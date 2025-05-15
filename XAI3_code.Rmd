@@ -1,0 +1,162 @@
+---
+title: "XAI3"
+author: "Victor Ferrando, Marcos Valero, Marcos Ranchal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(dplyr)
+library(randomForest)
+library(pdp)
+library(ggplot2)
+datos<- read.csv("day.csv")
+# 1. One-hot encoding para season (3 columnas, eliminamos una para evitar multicolinealidad)
+datos <- datos %>%
+  mutate(
+    season_2 = ifelse(season == 2, 1, 0),
+    season_3 = ifelse(season == 3, 1, 0),
+    season_4 = ifelse(season == 4, 1, 0)
+  )
+
+# 2. Variables MISTY y RAIN
+datos <- datos %>%
+  mutate(
+    MISTY = ifelse(weathersit == 2, 1, 0),
+    RAIN = ifelse(weathersit %in% c(3, 4), 1, 0)
+  )
+
+# 3. Desnormalizar temp, hum y windspeed
+# Según documentación, los valores fueron normalizados dividiendo por:
+# temp (C): /41, hum: /100, windspeed: /67
+datos <- datos %>%
+  mutate(
+    temp_real = temp * 41,
+    hum_real = hum * 100,
+    windspeed_real = windspeed * 67
+  )
+
+# 4. Crear days_since_2011
+datos$dteday <- as.Date(datos$dteday)
+datos$days_since_2011 <- as.numeric(difftime(datos$dteday, as.Date("2011-01-01"), units = "days"))
+
+```
+
+# 1. One dimensional Partial Dependence Plot
+
+```{r rf}
+# Select relevant features and target
+features <- c("days_since_2011", "temp_real", "hum_real", "windspeed_real")
+df_model <- datos[, c(features, "cnt")]
+
+# Fit Random Forest
+set.seed(42)
+rf_model <- randomForest(cnt ~ ., data = df_model, ntree = 100)#df_model
+library(gridExtra)
+
+p1 <- partial(rf_model, pred.var = "days_since_2011", plot = TRUE, rug = TRUE, main = "Effect of Days Since 2011")
+p2 <- partial(rf_model, pred.var = "temp_real", plot = TRUE, rug = TRUE, main = "Effect of Temperature")
+p3 <- partial(rf_model, pred.var = "hum_real", plot = TRUE, rug = TRUE, main = "Effect of Humidity")
+p4 <- partial(rf_model, pred.var = "windspeed_real", plot = TRUE, rug = TRUE, main = "Effect of Wind Speed")
+
+p1
+p2
+p3
+p4
+```
+
+# 2. - Bidimensional Partial Dependency Plot
+
+
+```{r}
+df_model_sampled <- df_model %>% sample_n(300)
+set.seed(42)
+rf_model_2 <- randomForest(cnt ~ ., data = df_model_sampled, ntree = 100)
+
+
+# Compute 2D PDP
+pdp_2d <- partial(
+  object = rf_model_2,
+  pred.var = c("temp_real", "hum_real"),
+  grid.resolution = 30,
+  progress = "none"
+)
+
+pdp_df <- as.data.frame(pdp_2d)
+
+
+
+ggplot() +
+  # Heatmap plano
+  geom_tile(
+    data = pdp_df,
+    aes(x = temp_real, y = hum_real, fill = yhat),
+    width = 1.5, height = 2
+  ) +
+  
+  # Escala de color azul
+  scale_fill_gradient(low = "#000020", high = "#00bfff") +
+
+  # Rug plots (opcional)
+  geom_rug(data = df_model_sampled, aes(x = temp_real), sides = "b", alpha = 0.5) +
+  geom_rug(data = df_model_sampled, aes(y = hum_real), sides = "l", alpha = 0.5) +
+
+  # Títulos
+  labs(
+    title = "2D Partial Dependence Plot",
+    x = "Temperature (°C)",
+    y = "Humidity (%)",
+    fill = "ŷ"
+  ) +
+  
+  # Escalado
+  coord_fixed(ratio = 0.25) +
+  theme_minimal()
+
+
+
+```
+
+The 2D Partial Dependence Plot (PDP) displayed above illustrates the combined effect of temperature (°C) and humidity (%) on the predicted number of bike rentals (ŷ), as estimated by a machine learning model. This type of plot is useful for visualizing how a model's predictions respond to changes in two input variables, while marginalizing over the influence of all other variables in the dataset.
+
+As observed, temperature plays a prominent role in shaping the prediction output. The horizontal color gradient, shifting from dark shades (representing lower predicted rentals) to lighter shades (indicating higher predicted rentals) as temperature increases, clearly shows that higher temperatures are associated with increased bike rental predictions. This trend is consistent with real-world behavior, where people are generally more likely to rent bikes in warmer weather.
+
+In contrast, humidity appears to exert a relatively minor effect on the model’s predictions. The vertical axis, representing humidity, shows minimal color variation from top to bottom, suggesting that changes in humidity alone do not significantly alter the predicted rental count. This may be because humidity either has a limited effect on bike rental decisions or its influence is not strongly captured by the model, potentially due to a non-linear or weak relationship.
+
+The interaction between temperature and humidity also seems limited. While the plot shows distinct horizontal gradients (driven by temperature), there are no corresponding sharp vertical gradients (which would indicate a strong effect from humidity). This indicates that temperature is the dominant variable, and that the combined or interaction effect between temperature and humidity is either weak or negligible within the model.
+
+The rug plots—black tick marks along both axes—represent the distribution of actual data used to train the model. These ticks indicate that the training data is most densely concentrated around 20–30°C and 50–80% humidity. This suggests that the model’s predictions are most reliable within this range, and that caution should be used when interpreting predictions in areas with fewer data points (e.g., temperatures below 10°C or humidity above 90%), as the model may be extrapolating in those regions.
+
+In conclusion, the Random Forest model used for predicting bike rentals has effectively captured a strong and intuitive relationship with temperature, showing that bike rentals increase as temperatures rise. In contrast, humidity has a much weaker or nearly neutral influence, and its interaction with temperature appears minimal. These insights can help inform decision-making related to demand forecasting and planning in bike-sharing systems under different weather conditions.
+
+
+
+
+
+# 3. PDP to explain the price of a house.
+
+```{r}
+house_data<- read.csv("kc_house_data.csv")
+df_house_sampled <- house_data %>% sample_n(500)
+set.seed(42)
+rf_model_3 <- randomForest(price~ bedrooms+bathrooms+sqft_living+sqft_lot+floors+yr_built, data = df_house_sampled, ntree = 100)
+
+
+
+p1 <- partial(rf_model_3, pred.var = "bedrooms", plot = TRUE, rug = TRUE)
+p2 <- partial(rf_model_3, pred.var = "bathrooms", plot = TRUE, rug = TRUE)
+p3 <- partial(rf_model_3, pred.var = "sqft_living", plot = TRUE, rug = TRUE)
+p4 <- partial(rf_model_3, pred.var = "sqft_lot", plot = TRUE, rug = TRUE)
+p5 <- partial(rf_model_3, pred.var = "floors", plot = TRUE, rug = TRUE)
+p6 <- partial(rf_model_3, pred.var = "yr_built", plot = TRUE, rug = TRUE)
+p1
+p2
+p3
+p4
+p5
+p6
+```
+
